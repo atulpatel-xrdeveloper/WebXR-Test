@@ -1212,29 +1212,29 @@ var tempDouble;
 var tempI64;
 
 var ASM_CONSTS = {
- 2483248: function() {
+ 2487796: function() {
   Module["emscripten_get_now_backup"] = performance.now;
  },
- 2483303: function($0) {
+ 2487851: function($0) {
   performance.now = function() {
    return $0;
   };
  },
- 2483351: function($0) {
+ 2487899: function($0) {
   performance.now = function() {
    return $0;
   };
  },
- 2483399: function() {
+ 2487947: function() {
   performance.now = Module["emscripten_get_now_backup"];
  },
- 2483454: function() {
+ 2488002: function() {
   return Module.webglContextAttributes.premultipliedAlpha;
  },
- 2483515: function() {
+ 2488063: function() {
   return Module.webglContextAttributes.preserveDrawingBuffer;
  },
- 2483579: function() {
+ 2488127: function() {
   return Module.webglContextAttributes.powerPreference;
  }
 };
@@ -1559,6 +1559,39 @@ function _JS_Accelerometer_Stop() {
  }
 }
 
+var cameraAccess = 0;
+
+function _JS_AsyncWebCam_GetPermission(op, onWebcamAccessResponse) {
+ if (!navigator.mediaDevices) {
+  cameraAccess = 2;
+  (function(a1) {
+   dynCall_vi.apply(null, [ onWebcamAccessResponse, a1 ]);
+  })(op);
+  return;
+ }
+ navigator.mediaDevices.getUserMedia({
+  audio: false,
+  video: true
+ }).then(function(stream) {
+  var tracks = stream.getVideoTracks();
+  tracks.forEach(function(track) {
+   track.stop();
+  });
+  cameraAccess = 1;
+  navigator.mediaDevices.enumerateDevices().then(function(devices) {
+   updateVideoInputDevices(devices);
+   (function(a1) {
+    dynCall_vi.apply(null, [ onWebcamAccessResponse, a1 ]);
+   })(op);
+  });
+ }).catch(function(err) {
+  cameraAccess = 2;
+  (function(a1) {
+   dynCall_vi.apply(null, [ onWebcamAccessResponse, a1 ]);
+  })(op);
+ });
+}
+
 function _JS_Cursor_SetImage(ptr, length) {
  var binary = "";
  for (var i = 0; i < length; i++) binary += String.fromCharCode(HEAPU8[ptr + i]);
@@ -1639,6 +1672,10 @@ function _JS_Focus_Window() {
  if (activeElem != canvas && activeElem != window && activeElem != document.body) {
   window.focus();
  }
+}
+
+function _JS_GetCurrentCameraAccessState() {
+ return cameraAccess;
 }
 
 var JS_GravitySensor = null;
@@ -2805,6 +2842,119 @@ function _JS_SystemInfo_HasWebGL() {
 
 function _JS_UnityEngineShouldQuit() {
  return !!Module.shouldQuit;
+}
+
+var activeWebCams = {};
+
+function _JS_WebCamVideo_CanPlay(deviceId) {
+ var webcam = activeWebCams[deviceId];
+ return webcam && webcam.video.videoWidth > 0 && webcam.video.videoHeight > 0;
+}
+
+function _JS_WebCamVideo_GetDeviceName(deviceId, buffer, bufferSize) {
+ var webcam = videoInputDevices[deviceId];
+ var name = webcam ? webcam.name : "(disconnected input #" + (deviceId + 1) + ")";
+ if (buffer) stringToUTF8(name, buffer, bufferSize);
+ return lengthBytesUTF8(name);
+}
+
+function _JS_WebCamVideo_GetNativeHeight(deviceId) {
+ return activeWebCams[deviceId] && activeWebCams[deviceId].video.videoHeight;
+}
+
+function _JS_WebCamVideo_GetNativeWidth(deviceId) {
+ return activeWebCams[deviceId] && activeWebCams[deviceId].video.videoWidth;
+}
+
+function _JS_WebCamVideo_GetNumDevices() {
+ var numDevices = 0;
+ Object.keys(videoInputDevices).forEach(function(i) {
+  numDevices = Math.max(numDevices, videoInputDevices[i].id + 1);
+ });
+ return numDevices;
+}
+
+function _JS_WebCamVideo_GrabFrame(deviceId, buffer, destWidth, destHeight) {
+ var webcam = activeWebCams[deviceId];
+ if (!webcam) return;
+ var timeNow = performance.now();
+ if (timeNow < webcam.nextFrameAvailableTime) {
+  return;
+ }
+ webcam.nextFrameAvailableTime += webcam.frameLengthInMsecs;
+ if (webcam.nextFrameAvailableTime < timeNow) {
+  webcam.nextFrameAvailableTime = timeNow + webcam.frameLengthInMsecs;
+ }
+ var canvas = webcam.canvas;
+ if (canvas.width != destWidth || canvas.height != destHeight || !webcam.context2d) {
+  canvas.width = destWidth;
+  canvas.height = destHeight;
+  webcam.context2d = canvas.getContext("2d");
+ }
+ var context = webcam.context2d;
+ context.drawImage(webcam.video, 0, 0, webcam.video.videoWidth, webcam.video.videoHeight, 0, 0, destWidth, destHeight);
+ HEAPU8.set(context.getImageData(0, 0, destWidth, destHeight).data, buffer);
+ return 1;
+}
+
+function _JS_WebCamVideo_IsFrontFacing(deviceId) {
+ return videoInputDevices[deviceId].isFrontFacing;
+}
+
+function _JS_WebCamVideo_Start(deviceId) {
+ if (activeWebCams[deviceId]) {
+  ++activeWebCams[deviceId].refCount;
+  return;
+ }
+ if (!videoInputDevices[deviceId]) {
+  console.error("Cannot start video input with ID " + deviceId + ". No such ID exists! Existing video inputs are:");
+  console.dir(videoInputDevices);
+  return;
+ }
+ navigator.mediaDevices.getUserMedia({
+  audio: false,
+  video: videoInputDevices[deviceId].deviceId ? {
+   deviceId: {
+    exact: videoInputDevices[deviceId].deviceId
+   }
+  } : true
+ }).then(function(stream) {
+  var video = document.createElement("video");
+  video.srcObject = stream;
+  if (/(iPhone|iPad|iPod)/.test(navigator.userAgent)) {
+   warnOnce("Applying iOS Safari specific workaround to video playback: https://bugs.webkit.org/show_bug.cgi?id=217578");
+   video.setAttribute("playsinline", "");
+  }
+  video.play();
+  var canvas = document.createElement("canvas");
+  activeWebCams[deviceId] = {
+   video: video,
+   canvas: document.createElement("canvas"),
+   stream: stream,
+   frameLengthInMsecs: 1e3 / stream.getVideoTracks()[0].getSettings().frameRate,
+   nextFrameAvailableTime: 0,
+   refCount: 1
+  };
+ }).catch(function(e) {
+  console.error("Unable to start video input! " + e);
+ });
+}
+
+function _JS_WebCamVideo_Stop(deviceId) {
+ var webcam = activeWebCams[deviceId];
+ if (!webcam) return;
+ if (--webcam.refCount <= 0) {
+  webcam.video.pause();
+  webcam.video.srcObject = null;
+  webcam.stream.getVideoTracks().forEach(function(track) {
+   track.stop();
+  });
+  delete activeWebCams[deviceId];
+ }
+}
+
+function _JS_WebCam_IsSupported() {
+ return !!navigator.mediaDevices;
 }
 
 function _ListenWebXRData() {
@@ -13125,6 +13275,7 @@ var asmLibraryArg = {
  "JS_Accelerometer_IsRunning": _JS_Accelerometer_IsRunning,
  "JS_Accelerometer_Start": _JS_Accelerometer_Start,
  "JS_Accelerometer_Stop": _JS_Accelerometer_Stop,
+ "JS_AsyncWebCam_GetPermission": _JS_AsyncWebCam_GetPermission,
  "JS_Cursor_SetImage": _JS_Cursor_SetImage,
  "JS_Cursor_SetShow": _JS_Cursor_SetShow,
  "JS_DOM_MapViewportCoordinateToElementLocalCoordinate": _JS_DOM_MapViewportCoordinateToElementLocalCoordinate,
@@ -13132,6 +13283,7 @@ var asmLibraryArg = {
  "JS_FileSystem_Initialize": _JS_FileSystem_Initialize,
  "JS_FileSystem_Sync": _JS_FileSystem_Sync,
  "JS_Focus_Window": _JS_Focus_Window,
+ "JS_GetCurrentCameraAccessState": _JS_GetCurrentCameraAccessState,
  "JS_GravitySensor_IsRunning": _JS_GravitySensor_IsRunning,
  "JS_GravitySensor_Start": _JS_GravitySensor_Start,
  "JS_GravitySensor_Stop": _JS_GravitySensor_Stop,
@@ -13184,6 +13336,16 @@ var asmLibraryArg = {
  "JS_SystemInfo_HasFullscreen": _JS_SystemInfo_HasFullscreen,
  "JS_SystemInfo_HasWebGL": _JS_SystemInfo_HasWebGL,
  "JS_UnityEngineShouldQuit": _JS_UnityEngineShouldQuit,
+ "JS_WebCamVideo_CanPlay": _JS_WebCamVideo_CanPlay,
+ "JS_WebCamVideo_GetDeviceName": _JS_WebCamVideo_GetDeviceName,
+ "JS_WebCamVideo_GetNativeHeight": _JS_WebCamVideo_GetNativeHeight,
+ "JS_WebCamVideo_GetNativeWidth": _JS_WebCamVideo_GetNativeWidth,
+ "JS_WebCamVideo_GetNumDevices": _JS_WebCamVideo_GetNumDevices,
+ "JS_WebCamVideo_GrabFrame": _JS_WebCamVideo_GrabFrame,
+ "JS_WebCamVideo_IsFrontFacing": _JS_WebCamVideo_IsFrontFacing,
+ "JS_WebCamVideo_Start": _JS_WebCamVideo_Start,
+ "JS_WebCamVideo_Stop": _JS_WebCamVideo_Stop,
+ "JS_WebCam_IsSupported": _JS_WebCam_IsSupported,
  "ListenWebXRData": _ListenWebXRData,
  "ToggleViewerHitTest": _ToggleViewerHitTest,
  "__cxa_allocate_exception": ___cxa_allocate_exception,
